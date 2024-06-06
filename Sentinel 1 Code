@@ -1,124 +1,78 @@
-// Set map center to the AOI to make sure we have the correct study area
+// Import boundaries from asset
+var AOI = ee.FeatureCollection('projects/centering-timer-425613-e4/assets/jhang');
+
+// Set map center to the AOI for making sure we have the correct study area
 Map.centerObject(AOI, 9);
 
-// Import Sentinel-1 collection
+// Load the Sentinel-1 image collection.
 var sentinel1 = ee.ImageCollection('COPERNICUS/S1_GRD')
-                    .filterBounds(AOI)
-                    .filterDate('2023-08-01', '2023-09-30')
-                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
-                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
-                    .filter(ee.Filter.eq('instrumentMode', 'IW'));
+  .filterBounds(AOI)
+  .filterDate('2023-01-01', '2023-12-31')
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.eq('instrumentMode', 'IW'));
 
-var desc = sentinel1.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
-var asc = sentinel1.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+// Select the VV polarization and take the median.
+var vv = sentinel1.select('VV').median().clip(AOI);
 
-// Inspect number of tiles returned after the search; we will use the one with more tiles
-print("descending tiles ", desc.size());
-print("ascending tiles ", asc.size());
-// Also Inspect one file
-print(asc.first());
-print(desc.first());
+// Display the VV image.
+Map.addLayer(vv, {min: -25, max: 0}, 'VV polarization');
 
-// Create a composite from means at different polarizations and look angles.
-var composite = ee.Image.cat([
-  asc.select('VH').mean(),
-  asc.select('VV').mean(),
-  desc.select('VH').mean()
-]).focal_median();
+// Create training data: Define land cover classes and points.
+var urban = ee.FeatureCollection([
+  ee.Feature(ee.Geometry.Point([72.3, 31.3]), {'class': 0}),
+  ee.Feature(ee.Geometry.Point([72.35, 31.35]), {'class': 0}),
+  // Add more points as needed
+]);
 
-var composite = composite.clip(AOI);
+var water = ee.FeatureCollection([
+  ee.Feature(ee.Geometry.Point([72.4, 31.2]), {'class': 1}),
+  ee.Feature(ee.Geometry.Point([72.45, 31.25]), {'class': 1}),
+  // Add more points as needed
+]);
 
-// Display as a composite of polarization and backscattering characteristics.
-Map.addLayer(composite, {min: [-25, -20, -25], max: [0, 10, 0]}, 'composite');
+var vegetation = ee.FeatureCollection([
+  ee.Feature(ee.Geometry.Point([72.2, 31.1]), {'class': 2}),
+  ee.Feature(ee.Geometry.Point([72.25, 31.15]), {'class': 2}),
+  // Add more points as needed
+]);
 
-// Define the land cover classes
-var water = /* color: #0000ff */ ee.FeatureCollection(
-    [ee.Feature(
-        ee.Geometry.Point([70.9104, 32.6105]), // Add sample points for water
-        {"landcover": 1}),
-     ee.Feature(
-        ee.Geometry.Point([70.9124, 32.6125]),
-        {"landcover": 1})]
-);
+// Merge all classes into one FeatureCollection.
+var trainingPoints = urban.merge(water).merge(vegetation);
 
-var forest = /* color: #00ff00 */ ee.FeatureCollection(
-    [ee.Feature(
-        ee.Geometry.Point([70.9304, 32.6205]), // Add sample points for forest
-        {"landcover": 2}),
-     ee.Feature(
-        ee.Geometry.Point([70.9324, 32.6225]),
-        {"landcover": 2})]
-);
-
-var barren = /* color: #ffb6b6 */ ee.FeatureCollection(
-    [ee.Feature(
-        ee.Geometry.Point([70.9504, 32.6305]), // Add sample points for barren land
-        {"landcover": 3}),
-     ee.Feature(
-        ee.Geometry.Point([70.9524, 32.6325]),
-        {"landcover": 3})]
-);
-
-var urban = /* color: #ff0000 */ ee.FeatureCollection(
-    [ee.Feature(
-        ee.Geometry.Point([70.9704, 32.6405]), // Add sample points for urban areas
-        {"landcover": 4}),
-     ee.Feature(
-        ee.Geometry.Point([70.9724, 32.6425]),
-        {"landcover": 4})]
-);
-
-// Merge points together
-var newfc = water.merge(forest).merge(barren).merge(urban);
-print(newfc, 'newfc');
-
-var Bands_selection = ['VV', 'VH'];
-
-// Overlay
-var training = composite.sampleRegions({
-  collection: newfc,
-  properties: ['landcover'],
-  scale: 10
+// Sample the input imagery to get a FeatureCollection of training data.
+var training = vv.sampleRegions({
+  collection: trainingPoints,
+  properties: ['class'],
+  scale: 9
 });
 
-// Split: Training (75%) & Testing samples (25%).
-var Total_samples = training.randomColumn('random');
-var training_samples = Total_samples.filter(ee.Filter.lessThan('random', 0.75));
-print(training_samples, "Training Samples");
-var validation_samples = Total_samples.filter(ee.Filter.greaterThanOrEquals('random', 0.75));
-print(validation_samples, "Validation_Samples");
-
-// Random Forest Classifier
+// Train a Random Forest classifier with default parameters.
 var classifier = ee.Classifier.smileRandomForest(10).train({
   features: training,
-  classProperty: 'landcover',
-  inputProperties: Bands_selection
+  classProperty: 'class',
+  inputProperties: ['VV']
 });
 
-var classified = composite.classify(classifier);
+// Classify the image.
+var classified = vv.classify(classifier);
 
-// Define a palette for the Land Use classification.
+// Define a palette for the classes.
 var palette = [
-  'Blue', // water (1) 
-  'green', // forest (2) 
-  'fec89a', // barren (3) 
-  'Red'  // urban (4) 
+  'red',    // urban
+  'blue',   // water
+  'green'   // vegetation
 ];
 
-var classified = classified.clip(AOI);
-Map.addLayer(classified, {min: 1, max: 4, palette: palette}, "classification");
+// Add the classified image to the map.
+Map.addLayer(classified, {min: 0, max: 2, palette: palette}, 'Land Cover');
 
-// Print the confusion matrix and overall accuracy
-var confusionMatrix = classifier.confusionMatrix();
-print(confusionMatrix, 'Error matrix: ');
-print(confusionMatrix.accuracy(), 'Training Overall Accuracy: ');
-
-// Export the classified image to Google Drive
+// Export the classified image to your Google Drive.
 Export.image.toDrive({
   image: classified,
-  description: 'Classified_Image',
-  region: AOI,
-  scale: 10,
-  crs: 'EPSG:4326',
-  maxPixels: 1e13
+  description: 'Sentinel1_Classification_Jhang',
+  scale: 9,
+  region: AOI.geometry().bounds(),
+  folder: 'JHANG_BD',
+  fileNamePrefix: 'Sentinel1_Classification_Jhang',
+  fileFormat: 'GeoTIFF'
 });
